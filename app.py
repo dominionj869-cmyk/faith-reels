@@ -1,192 +1,151 @@
 
 import os
-import sqlite3
-from datetime import datetime
-from html import escape
+import json
+import html
+import urllib.request
+import urllib.error
+from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-app = FastAPI(title="Faith Reels")
+app = FastAPI()
 
-DB_PATH = os.getenv("DB_PATH", "faith_reels.db")
-
-
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 
-def setup_db():
-    with get_db() as db:
-        db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS videos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                caption TEXT NOT NULL,
-                video_url TEXT NOT NULL,
-                platforms TEXT NOT NULL,
-                scheduled_at TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'Queued'
-            )
-            """
-        )
+def db_request(method, path, data=None):
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise RuntimeError("Supabase environment variables are missing.")
+
+    url = SUPABASE_URL + "/rest/v1/videos" + path
+    body = None
+
+    if data is not None:
+        body = json.dumps(data).encode("utf-8")
+
+    req = urllib.request.Request(url, data=body, method=method)
+    req.add_header("apikey", SUPABASE_KEY)
+    req.add_header("Authorization", "Bearer " + SUPABASE_KEY)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept-Profile", "public")
+    req.add_header("Content-Profile", "public")
+    req.add_header("Prefer", "return=representation")
+
+    with urllib.request.urlopen(req, timeout=20) as response:
+        result = response.read().decode("utf-8")
+        return json.loads(result) if result else []
 
 
-setup_db()
-
-
-@app.get("/", response_class=HTMLResponse)
-def home():
-    with get_db() as db:
-        videos = db.execute(
-            "SELECT * FROM videos ORDER BY id DESC"
-        ).fetchall()
-
+def page(message=""):
     rows = ""
+    error = ""
 
-    for video in videos:
-        rows += (
-            "<tr><td>" + str(video["id"]) + "</td>"
-            "<td>" + escape(video["title"]) + "</td>"
-            "<td>" + escape(video["platforms"]) + "</td>"
-            "<td>" + escape(video["scheduled_at"]) + "</td>"
-            "<td>" + escape(video["status"]) + "</td></tr>"
+    try:
+        videos = db_request(
+            "GET",
+            "?select=id,title,platforms,scheduled_at,status"
+            "&order=scheduled_at.desc"
         )
+
+        for video in videos:
+            rows += (
+                "<tr><td>" + html.escape(str(video["id"])) + "</td>"
+                "<td>" + html.escape(video["title"]) + "</td>"
+                "<td>" + html.escape(video["platforms"]) + "</td>"
+                "<td>" + html.escape(video["scheduled_at"]) + "</td>"
+                "<td>" + html.escape(video["status"]) + "</td></tr>"
+            )
+
+    except Exception as exc:
+        error = str(exc)
 
     if not rows:
-        rows = (
-            "<tr><td colspan='5'>"
-            "No videos scheduled yet."
-            "</td></tr>"
+        rows = "<tr><td colspan='5'>No videos found.</td></tr>"
+
+    notice = ""
+    if message:
+        notice = "<p class='notice'>" + html.escape(message) + "</p>"
+
+    if error:
+        notice += (
+            "<p class='error'>Database connection error: "
+            + html.escape(error)
+            + "</p>"
         )
 
-    page = """
+    return """
     <!doctype html>
     <html>
     <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>Faith Reels</title>
     <style>
-    body {
-        font-family: Arial, sans-serif;
-        background: #101827;
-        color: white;
-        margin: 0;
-        padding: 20px;
-    }
-    main {
-        max-width: 850px;
-        margin: auto;
-    }
-    .panel {
-        background: #1d293b;
-        padding: 18px;
-        border-radius: 14px;
-        margin: 16px 0;
-    }
-    input:not([type=checkbox]), textarea, select {
-        box-sizing: border-box;
-        width: 100%;
-        padding: 12px;
-        margin: 7px 0 14px;
-        border-radius: 7px;
-        border: 1px solid #526078;
-    }
-    button {
-        background: #25a56a;
-        color: white;
-        padding: 13px;
-        border: 0;
-        border-radius: 8px;
-        width: 100%;
-        font-weight: bold;
-    }
-    table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 13px;
-    }
-    th, td {
-        padding: 9px 5px;
-        border-bottom: 1px solid #405067;
-        text-align: left;
-        overflow-wrap: anywhere;
-    }
-    h1 {
-        color: #69e6a2;
-    }
+    body{font-family:Arial,sans-serif;max-width:900px;margin:24px auto;
+    padding:0 14px;background:#f7f7fb;color:#222}
+    input,textarea,select,button{box-sizing:border-box;width:100%;
+    padding:12px;margin:7px 0;border:1px solid #ccc;border-radius:7px}
+    label{display:block;margin-top:12px;font-weight:bold}
+    button{background:#176b50;color:white;font-weight:bold;border:0}
+    .notice{background:#e1f5e8;padding:12px}
+    .error{background:#ffe6e6;padding:12px;overflow-wrap:anywhere}
+    .tablebox{overflow-x:auto}table{width:100%;background:white;
+    border-collapse:collapse}th,td{padding:9px;border:1px solid #ddd;
+    text-align:left}h1{color:#176b50}
     </style>
     </head>
     <body>
-    <main>
     <h1>Faith Reels</h1>
     <p>Plan your Christian video content in one place.</p>
-
-    <div class="panel">
+    """ + notice + """
     <h2>Add a video</h2>
-    <form method="post" action="/add">
-
+    <form action="/add" method="post">
     <label>Video title</label>
-    <input name="title" required maxlength="150">
-
+    <input name="title" required maxlength="200">
     <label>Caption</label>
-    <textarea name="caption" required maxlength="2000"></textarea>
-
+    <textarea name="caption" required rows="4"></textarea>
     <label>Direct HTTPS video URL</label>
-    <input name="video_url" type="url"
-    placeholder="https://example.com/video.mp4" required>
-
+    <input name="video_url" type="url" placeholder="https://..."
+    required>
     <label>Platforms (select one or more)</label>
     <select name="platforms" multiple required size="4">
-    <option value="YouTube">YouTube</option>
-    <option value="Instagram">Instagram</option>
-    <option value="Facebook">Facebook</option>
-    <option value="TikTok">TikTok</option>
+    <option>YouTube</option>
+    <option>Instagram</option>
+    <option>Facebook</option>
+    <option>TikTok</option>
     </select>
-
-    <small>On mobile, press and hold to select multiple options if supported.</small>
-
+    <p>On mobile, press and hold to select multiple options if supported.</p>
     <label>Schedule date and time</label>
     <input name="scheduled_at" type="datetime-local" required>
-
-    <p>
-    <label>
-    <input type="checkbox" name="rights" value="yes" required>
-    I own this video or have permission to publish it.
-    </label>
-    </p>
-
+    <label><input type="checkbox" name="permission" value="yes"
+    required style="width:auto"> I own this video or have permission
+    to publish it.</label>
     <button type="submit">Add to queue</button>
     </form>
-    </div>
-
-    <div class="panel">
     <h2>Video queue</h2>
-    <table>
-    <tr>
-    <th>ID</th>
-    <th>Title</th>
-    <th>Platforms</th>
-    <th>Scheduled</th>
-    <th>Status</th>
-    </tr>
-    ROWS
-    </table>
-    </div>
-
-    <p>
-    Videos are saved to this dashboard only.
-    Automatic social media publishing is not connected yet.
-    </p>
-    </main>
+    <div class="tablebox"><table>
+    <tr><th>ID</th><th>Title</th><th>Platforms</th>
+    <th>Scheduled</th><th>Status</th></tr>
+    """ + rows + """
+    </table></div>
+    <p>Videos are saved in Supabase. Automatic social media publishing
+    is not connected yet.</p>
     </body>
     </html>
     """
 
-    return HTMLResponse(page.replace("ROWS", rows))
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return page()
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "supabase_configured": bool(
+        SUPABASE_URL and SUPABASE_KEY
+    )}
 
 
 @app.post("/add")
@@ -196,70 +155,49 @@ def add_video(
     video_url: str = Form(...),
     platforms: list[str] = Form(...),
     scheduled_at: str = Form(...),
-    rights: str = Form(...)
+    permission: str = Form(...)
 ):
-    if rights != "yes":
-        return HTMLResponse(
-            "Permission confirmation is required.",
-            status_code=400
-        )
+    title = title.strip()
+    caption = caption.strip()
+    video_url = video_url.strip()
+    platforms = list(dict.fromkeys(platforms))
+
+    allowed = ["YouTube", "Instagram", "Facebook", "TikTok"]
+
+    if not title or not caption:
+        return HTMLResponse(page("Enter a title and caption."))
 
     if not video_url.startswith("https://"):
-        return HTMLResponse(
-            "Use a secure HTTPS video URL.",
-            status_code=400
-        )
+        return HTMLResponse(page("Use an HTTPS video URL."))
 
-    allowed = {
-        "YouTube",
-        "Instagram",
-        "Facebook",
-        "TikTok"
-    }
+    if not platforms or any(p not in allowed for p in platforms):
+        return HTMLResponse(page("Select valid platforms."))
 
-    selected = [p for p in platforms if p in allowed]
-
-    if not selected:
-        return HTMLResponse(
-            "Select at least one platform.",
-            status_code=400
-        )
-
-    if not title.strip() or not caption.strip():
-        return HTMLResponse(
-            "Title and caption are required.",
-            status_code=400
-        )
+    if permission != "yes":
+        return HTMLResponse(page("Confirm you have publishing permission."))
 
     try:
-        when = datetime.fromisoformat(scheduled_at)
-    except ValueError:
+        schedule = datetime.fromisoformat(scheduled_at)
+
+        if schedule.tzinfo is None:
+            lagos = timezone(timedelta(hours=1))
+            schedule = schedule.replace(tzinfo=lagos)
+
+        schedule = schedule.astimezone(timezone.utc).isoformat()
+
+        db_request("POST", "?select=id", {
+            "title": title,
+            "caption": caption,
+            "video_url": video_url,
+            "platforms": ", ".join(platforms),
+            "scheduled_at": schedule,
+            "status": "Queued"
+        })
+
+        return RedirectResponse("/", status_code=303)
+
+    except Exception as exc:
         return HTMLResponse(
-            "Invalid schedule time.",
-            status_code=400
+            page("Could not save video: " + str(exc)),
+            status_code=500
         )
-
-    with get_db() as db:
-        db.execute(
-            """
-            INSERT INTO videos
-            (title, caption, video_url, platforms,
-             scheduled_at, status)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                title.strip(),
-                caption.strip(),
-                video_url.strip(),
-                ", ".join(selected),
-                when.isoformat(),
-                "Queued"
-            )
-        )
-
-    return RedirectResponse("/", status_code=303)
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "app": "Faith Reels"}
